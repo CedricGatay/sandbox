@@ -1,0 +1,103 @@
+#! /usr/bin/python
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2011 Grzegorz Sobański
+#
+# Version: 2.0
+#
+# Git post receive script developed for mlabs
+# - adds the commits to trac
+# based on post-receive-email from git-contrib
+#
+
+import re
+import os
+import sys
+from subprocess import Popen, PIPE, call
+
+# config
+TRAC_HOOK= '/home/git/hooks/trac-post-commit-hook'
+TRAC_ENV = '/usr2/trac/srmvision'
+GIT_PATH = '/usr/bin/git'
+TRAC_ADMIN = '/usr/local/bin/trac-admin'
+REPO_NAME = 'git-clone'
+BRANCHES=['master']
+
+# if you are using gitolite or sth similar, you can get the repo name from environemt
+# REPO_NAME = os.getenv('GL_REPO')
+
+# communication with git
+
+def log(v):
+    print(v)
+
+
+def call_git(command, args, input=None):
+    return Popen([GIT_PATH, command] + args, stdin=PIPE, stdout=PIPE).communicate(input)[0]
+
+
+def get_new_commits(ref_updates):
+    """ Gets a list uf updates from git running post-receive,
+    we want the list of new commits to the repo, that are part
+    of the push. 
+
+    It returns a list of commits"""
+
+    new_commits = []
+    commands = []
+
+    all_refs = set(call_git('for-each-ref', ['--format=%(refname)']).splitlines())
+    for old, new, ref in ref_updates:
+        # branch delete, skip it
+        if re.match('0*$', new):
+            continue
+
+        commands += [new]
+        all_refs.discard(ref)
+
+        if not re.match('0*$', old):
+            # update
+            commands += ["^%s" % old]
+        # else: new - do nothing more
+        #if we are not updating master, we exclude commits from other branches than ours
+        if not ref.startswith('refs/heads/') or ref[11:] not in BRANCHES:
+            for ref_tmp in all_refs:
+                commands += ["^%s" % ref_tmp]
+        ref = ref.replace('refs/heads/', '')
+        new_commits += [(call_git('rev-list', ['--stdin', '--reverse'], '\n'.join(commands)).splitlines(), ref)]
+        commands = []
+    
+    return new_commits
+
+def handle_trac(commits_refs_tuple):
+    if not (os.path.exists(TRAC_ENV) and os.path.isdir(TRAC_ENV)):
+        print "Trac path (%s) is not a directory." % TRAC_ENV
+
+    if len(commits) == 0:
+        return
+
+    cli = ['echo']
+    for commits_in_ref, ref in commits_refs_tuple:
+        log("[HOOK] - %s commits to handle for branch '%s'" % (len(commits_in_ref), ref))
+        for commit in commits_in_ref:
+            #log("%s, %s"  % (commit, ref))
+            branches = ref
+            cli += [TRAC_HOOK, '-p', TRAC_ENV, '-r', commit, '-b', "'"+ref+"'", ';']
+
+    # Use 'at now + 1min' to schedule parsing of commits (non-blocking)
+    p1 = Popen(cli, stdout=PIPE)
+    p2 = Popen(['at', 'now + 1min'], stdin=p1.stdout, stdout=PIPE, stderr=PIPE)
+    p1.stdout.close()
+
+
+
+# main
+if __name__ == '__main__':
+    lines = sys.stdin.readlines()
+    updates = [line.split() for line in lines]
+    log("[HOOK] - Getting new commits")
+    commits = get_new_commits(updates)
+    log("[HOOK] - Parsing commits to update Trac...")
+    handle_trac(commits)
+    log("[HOOK] - Trac synchronization scheduled")
+
